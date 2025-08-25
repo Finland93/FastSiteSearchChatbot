@@ -3,21 +3,21 @@
 Plugin Name: Fast Site Search Chatbot
 Plugin URI: https://github.com/Finland93/FastSiteSearchChatbot
 Description: No-AI chatbot that answers from your site content via a private JSON dataset and an inline MiniSearch-compatible engine. Auto widget, smart daily cron (rebuild only on change, rotate filename daily), exclude rules with UI pickers, hardened security, and server/client rate limiting.
-Version: 1.8.0
+Version: 1.9.1
 Author: Finland93
 Author URI: https://github.com/Finland93
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Text Domain: fast-site-search-chatbot
+Tags: search, chatbot, local-search, site-search, faq, no-ai, privacy, instant-search, wp-search, lightweight
 */
-
 
 if (!defined('ABSPATH')) exit;
 
 class FSSC_Plugin {
   const DS_DIR     = 'fssc-dataset';
-  const OPT_FILE   = 'fssc_dataset_file'; // current randomized dataset filename
-  const OPT_SIG    = 'fssc_content_sig';  // signature of content at last rebuild
+  const OPT_FILE   = 'fssc_dataset_file';
+  const OPT_SIG    = 'fssc_content_sig';
   const CRON_HOOK  = 'fssc_daily_rebuild_event';
 
   // server rate limits
@@ -64,12 +64,16 @@ class FSSC_Plugin {
   /* ---------------- Settings ---------------- */
 
   public function register_settings() {
+    // position + results
     register_setting('fssc_settings', 'fssc_position', [
       'type'=>'string','default'=>'right',
       'sanitize_callback'=>fn($v)=> in_array($v,['left','right'],true)?$v:'right'
     ]);
+    register_setting('fssc_settings','fssc_topk',[
+      'type'=>'integer','default'=>5,'sanitize_callback'=>'absint'
+    ]);
 
-    // Accept string OR array (from multi-selects); store as comma string of IDs
+    // helper sanitizer (array of ids -> csv)
     $sanitize_ids = function($v){
       if (is_array($v)) {
         $ids = array_map('intval', $v);
@@ -79,106 +83,158 @@ class FSSC_Plugin {
       return preg_replace('/[^0-9, ]/','',(string)$v);
     };
 
+    // exclude pickers
     register_setting('fssc_settings', 'fssc_exclude_ids',  ['type'=>'string','default'=>'','sanitize_callback'=>$sanitize_ids]);
     register_setting('fssc_settings', 'fssc_exclude_cats', ['type'=>'string','default'=>'','sanitize_callback'=>$sanitize_ids]);
     register_setting('fssc_settings', 'fssc_exclude_tags', ['type'=>'string','default'=>'','sanitize_callback'=>$sanitize_ids]);
+
+    // disable widget on pages
+    register_setting('fssc_settings','fssc_disable_pages',['type'=>'string','default'=>'','sanitize_callback'=>$sanitize_ids]);
+
+    // launcher colors (WP color picker)
+    register_setting('fssc_settings','fssc_color_bg',['type'=>'string','default'=>'#111827','sanitize_callback'=>'sanitize_hex_color']);
+    register_setting('fssc_settings','fssc_color_fg',['type'=>'string','default'=>'#ffffff','sanitize_callback'=>'sanitize_hex_color']);
 
     if (!get_option(self::OPT_FILE)) add_option(self::OPT_FILE, '');
     if (!get_option(self::OPT_SIG))  add_option(self::OPT_SIG,  '');
   }
 
   public function admin_menu() {
-    add_menu_page('Free Site Search Chatbot','Free Chatbot','manage_options','fssc',[$this,'admin_page'],'dashicons-format-chat',82);
+    add_menu_page('Fast Site Search Chatbot','Fast Chatbot','manage_options','fssc',[$this,'admin_page'],'dashicons-format-chat',82);
   }
 
   public function admin_assets($hook) {
     if ($hook !== 'toplevel_page_fssc') return;
 
-    // ✅ Register a handle with no external src, then enqueue it
-    wp_register_script('fssc-admin', false, [], '1.0.1', true);
+    // color picker
+    wp_enqueue_style('wp-color-picker');
+    wp_enqueue_script('wp-color-picker');
+
+    // printable handle + inline JS
+    wp_register_script('fssc-admin', false, [], '1.0.3', true);
     wp_enqueue_script('fssc-admin');
 
     $ajax  = admin_url('admin-ajax.php');
     $nonce = wp_create_nonce('fssc_build');
+
     $inline = <<<JS
-  (function(){
-    const btn = document.getElementById('fssc-build');
-    const out = document.getElementById('fssc-output');
-    const spinner = document.getElementById('fssc-spinner');
-    const timeLbl = document.getElementById('fssc-elapsed');
-    if(!btn||!out||!spinner||!timeLbl) return;
+(function(){
+  // init color pickers
+  jQuery(function($){ $('.fssc-color').wpColorPicker(); });
 
-    let timer = null, start = 0;
-    function startTimer(){ start=Date.now(); timeLbl.textContent='0.0s';
-      if (timer) clearInterval(timer);
-      timer=setInterval(()=>{ timeLbl.textContent=((Date.now()-start)/1000).toFixed(1)+'s'; },100);
+  // reusable checkbox filter + sync
+  function bindCheckboxGroup(groupId, hiddenId, filterId){
+    const box = document.getElementById(groupId);
+    const hidden = document.getElementById(hiddenId);
+    const filter = document.getElementById(filterId);
+    if(!box || !hidden) return;
+
+    function syncHidden(){
+      const ids = Array.from(box.querySelectorAll('input[type="checkbox"]:checked')).map(el=>el.value);
+      hidden.value = ids.join(',');
     }
-    function stopTimer(){ if(timer){ clearInterval(timer); timer=null; } }
+    box.addEventListener('change', syncHidden);
 
-    btn.addEventListener('click', async function(){
-      btn.disabled = true; out.textContent = 'Building dataset…';
-      spinner.style.display = 'inline-block'; startTimer();
-      try{
-        const fd = new FormData();
-        fd.append('action','fssc_build_dataset');
-        fd.append('_fssc_nonce','{$nonce}');
-        const res = await fetch('{$ajax}',{method:'POST',body:fd,credentials:'same-origin'});
-        const data = await res.json();
-        if (data && data.success) {
-          out.innerHTML = '✅ Dataset built (no rotation). ' +
-            'Docs: <strong>'+ (data.data.count||0) +'</strong> • ' +
-            'Size: '+ (data.data.size||0) +' bytes • ' +
-            'Updated: '+ (data.data.mtime||'') +' • ' +
-            'Filename: '+ (data.data.file||'') +
-            ' • Time: ' + timeLbl.textContent;
-        } else {
-          out.textContent = (data && data.data && data.data.message) ? data.data.message : 'Build failed.';
-        }
-      } catch(e) {
-        out.textContent='Error building dataset.';
-      } finally {
-        stopTimer(); spinner.style.display='none'; btn.disabled=false;
-      }
-    });
-  })();
-  JS;
-    wp_add_inline_script('fssc-admin', $inline);
+    if (filter) {
+      filter.addEventListener('input', function(){
+        const q = this.value.toLowerCase().trim();
+        box.querySelectorAll('label').forEach(lab=>{
+          const txt = lab.getAttribute('data-text') || lab.textContent || '';
+          lab.style.display = txt.toLowerCase().includes(q) ? '' : 'none';
+        });
+      });
+    }
+    // initial sync in case of pre-checked
+    syncHidden();
   }
 
+  // bind all groups
+  bindCheckboxGroup('fssc-cats-box','fssc_exclude_cats','fssc-cats-filter');
+  bindCheckboxGroup('fssc-tags-box','fssc_exclude_tags','fssc-tags-filter');
+  bindCheckboxGroup('fssc-posts-box','fssc_exclude_ids','fssc-posts-filter');
+  bindCheckboxGroup('fssc-pages-box','fssc_disable_pages','fssc-pages-filter');
+
+  // dataset build button
+  const btn = document.getElementById('fssc-build');
+  const out = document.getElementById('fssc-output');
+  const spinner = document.getElementById('fssc-spinner');
+  const timeLbl = document.getElementById('fssc-elapsed');
+  if(!btn||!out||!spinner||!timeLbl) return;
+
+  let timer = null, start = 0;
+  function startTimer(){ start=Date.now(); timeLbl.textContent='0.0s';
+    if (timer) clearInterval(timer);
+    timer=setInterval(()=>{ timeLbl.textContent=((Date.now()-start)/1000).toFixed(1)+'s'; },100);
+  }
+  function stopTimer(){ if(timer){ clearInterval(timer); timer=null; } }
+
+  btn.addEventListener('click', async function(){
+    btn.disabled = true; out.textContent = 'Building dataset…';
+    spinner.style.display = 'inline-block'; startTimer();
+    try{
+      const fd = new FormData();
+      fd.append('action','fssc_build_dataset');
+      fd.append('_fssc_nonce','{$nonce}');
+      const res = await fetch('{$ajax}',{method:'POST',body:fd,credentials:'same-origin'});
+      const data = await res.json();
+      if (data && data.success) {
+        out.innerHTML = '✅ Dataset built (no rotation). ' +
+          'Docs: <strong>'+ (data.data.count||0) +'</strong> • ' +
+          'Size: '+ (data.data.size||0) +' bytes • ' +
+          'Updated: '+ (data.data.mtime||'') +' • ' +
+          'Filename: '+ (data.data.file||'') +
+          ' • Time: ' + timeLbl.textContent;
+      } else {
+        out.textContent = (data && data.data && data.data.message) ? data.data.message : 'Build failed.';
+      }
+    } catch(e) {
+      out.textContent='Error building dataset.';
+    } finally {
+      stopTimer(); spinner.style.display='none'; btn.disabled=false;
+    }
+  });
+})();
+JS;
+    wp_add_inline_script('fssc-admin', $inline);
+  }
 
   public function admin_page() {
     if (!current_user_can('manage_options')) return;
 
-    $info = $this->dataset_info();
-    $pos  = get_option('fssc_position', 'right');
+    $info  = $this->dataset_info();
+    $pos   = get_option('fssc_position', 'right');
+    $topk  = (int)get_option('fssc_topk', 5);
+    $ids_s = get_option('fssc_exclude_ids', '');
+    $cats_s= get_option('fssc_exclude_cats', '');
+    $tags_s= get_option('fssc_exclude_tags', '');
+    $file  = get_option(self::OPT_FILE, '');
+    $bg    = get_option('fssc_color_bg', '#111827');
+    $fg    = get_option('fssc_color_fg', '#ffffff');
+    $disable_s = get_option('fssc_disable_pages','');
 
-    // current stored excludes (comma strings)
-    $ids_str  = get_option('fssc_exclude_ids', '');
-    $cats_str = get_option('fssc_exclude_cats', '');
-    $tags_str = get_option('fssc_exclude_tags', '');
-    $file     = get_option(self::OPT_FILE, '');
+    $sel_ids  = $this->ids_from_csv($ids_s);
+    $sel_cats = $this->ids_from_csv($cats_s);
+    $sel_tags = $this->ids_from_csv($tags_s);
+    $sel_dis  = $this->ids_from_csv($disable_s);
 
-    $sel_ids  = $this->ids_from_csv($ids_str);
-    $sel_cats = $this->ids_from_csv($cats_str);
-    $sel_tags = $this->ids_from_csv($tags_str);
-
-    // fetch real categories & tags
-    $cats = get_categories(['hide_empty'=>false]);
-    $tags = get_tags(['hide_empty'=>false]);
-
-    // (optional) fetch posts/pages list for convenience (limit to 500 to keep UI snappy)
+    $cats  = get_categories(['hide_empty'=>false]);
+    $tags  = get_tags(['hide_empty'=>false]);
     $posts = get_posts(['post_type'=>['post','page'],'post_status'=>'publish','numberposts'=>500,'orderby'=>'date','order'=>'DESC']);
-
+    $pages = get_pages(['sort_order'=>'DESC','sort_column'=>'post_date','post_status'=>'publish']);
     ?>
     <div class="wrap">
-      <h1>Free Site Search Chatbot</h1>
+      <h1>Fast Site Search Chatbot</h1>
 
       <style>
-        .fssc-admin-grid { display:grid; grid-template-columns: 240px 1fr; gap:18px; align-items:center; }
-        .fssc-multi { width: 100%; max-width: 520px; }
+        .fssc-admin-grid { display:grid; grid-template-columns: 240px 1fr; gap:18px; align-items:start; }
+        .fssc-help { color:#6b7280; font-size:12px; margin-top:4px; }
+        .codebox { background:#f8fafc; border:1px solid #e5e7eb; padding:10px; border-radius:8px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; }
+        .chk-wrap { border:1px solid #e5e7eb; border-radius:8px; padding:10px; max-height:260px; overflow:auto; background:#fff; }
+        .chk-wrap label { display:block; padding:4px 6px; border-radius:6px; }
+        .chk-wrap label:hover { background:#f8fafc; }
+        .chk-filter { width:100%; max-width:420px; margin-bottom:8px; }
         #fssc-spinner { display:none; width:14px; height:14px; border:2px solid #cbd5e1; border-top-color:#111827; border-radius:50%; animation:fssc-spin 0.9s linear infinite; vertical-align:middle; margin-right:8px; }
         @keyframes fssc-spin { to { transform: rotate(360deg); } }
-        .fssc-help { color:#6b7280; font-size:12px; margin-top:4px; }
       </style>
 
       <form method="post" action="options.php">
@@ -193,54 +249,83 @@ class FSSC_Plugin {
             </select>
           </div>
 
-          <label for="fssc_exclude_cats"><strong>Exclude categories</strong></label>
+          <label for="fssc_topk"><strong>Results to show</strong></label>
           <div>
-            <select id="fssc_exclude_cats" name="fssc_exclude_cats[]" class="fssc-multi" multiple size="8">
+            <input type="number" id="fssc_topk" name="fssc_topk" min="1" max="10" value="<?php echo (int)$topk; ?>" />
+            <div class="fssc-help">How many article links to return per query.</div>
+          </div>
+
+          <label><strong>Launcher colors</strong></label>
+          <div>
+            <input type="text" class="fssc-color" id="fssc_color_bg" name="fssc_color_bg" value="<?php echo esc_attr($bg); ?>" />
+            <label for="fssc_color_bg">Background</label>
+            &nbsp;&nbsp;
+            <input type="text" class="fssc-color" id="fssc_color_fg" name="fssc_color_fg" value="<?php echo esc_attr($fg); ?>" />
+            <label for="fssc_color_fg">Icon</label>
+          </div>
+
+          <!-- Exclude categories -->
+          <label for="fssc-cats-filter"><strong>Exclude categories</strong></label>
+          <div>
+            <input type="text" id="fssc-cats-filter" class="chk-filter" placeholder="Filter categories..." />
+            <div id="fssc-cats-box" class="chk-wrap">
               <?php foreach ($cats as $c): ?>
-                <option value="<?php echo intval($c->term_id); ?>" <?php selected(in_array($c->term_id, $sel_cats, true)); ?>>
-                  <?php echo esc_html($c->name); ?>
-                </option>
+                <label data-text="<?php echo esc_attr($c->name); ?>">
+                  <input type="checkbox" value="<?php echo intval($c->term_id); ?>" <?php checked(in_array($c->term_id, $sel_cats, true)); ?> />
+                  <?php echo esc_html($c->name); ?> (ID: <?php echo intval($c->term_id); ?>)
+                </label>
               <?php endforeach; ?>
-            </select>
-            <div class="fssc-help">Hold Ctrl/Cmd to select multiple.</div>
+            </div>
+            <input type="hidden" id="fssc_exclude_cats" name="fssc_exclude_cats" value="<?php echo esc_attr($cats_s); ?>" />
+            <div class="fssc-help">Checked categories will be excluded from the dataset.</div>
           </div>
 
-          <label for="fssc_exclude_tags"><strong>Exclude tags</strong></label>
+          <!-- Exclude tags -->
+          <label for="fssc-tags-filter"><strong>Exclude tags</strong></label>
           <div>
-            <select id="fssc_exclude_tags" name="fssc_exclude_tags[]" class="fssc-multi" multiple size="8">
+            <input type="text" id="fssc-tags-filter" class="chk-filter" placeholder="Filter tags..." />
+            <div id="fssc-tags-box" class="chk-wrap">
               <?php foreach ($tags as $t): ?>
-                <option value="<?php echo intval($t->term_id); ?>" <?php selected(in_array($t->term_id, $sel_tags, true)); ?>>
-                  <?php echo esc_html($t->name); ?>
-                </option>
+                <label data-text="<?php echo esc_attr($t->name); ?>">
+                  <input type="checkbox" value="<?php echo intval($t->term_id); ?>" <?php checked(in_array($t->term_id, $sel_tags, true)); ?> />
+                  <?php echo esc_html($t->name); ?> (ID: <?php echo intval($t->term_id); ?>)
+                </label>
               <?php endforeach; ?>
-            </select>
-            <div class="fssc-help">Hold Ctrl/Cmd to select multiple.</div>
+            </div>
+            <input type="hidden" id="fssc_exclude_tags" name="fssc_exclude_tags" value="<?php echo esc_attr($tags_s); ?>" />
+            <div class="fssc-help">Checked tags will be excluded from the dataset.</div>
           </div>
 
-          <label for="fssc_exclude_ids"><strong>Exclude specific posts/pages</strong></label>
+          <!-- Exclude specific posts/pages -->
+          <label for="fssc-posts-filter"><strong>Exclude specific posts/pages</strong></label>
           <div>
-            <select id="fssc_exclude_ids_picker" class="fssc-multi" multiple size="10" style="max-width:720px;">
-              <?php foreach ($posts as $p): ?>
-                <option value="<?php echo intval($p->ID); ?>" <?php selected(in_array($p->ID, $sel_ids, true)); ?>>
-                  [<?php echo esc_html(get_post_type($p)); ?>] <?php echo esc_html(get_the_title($p)); ?> (ID: <?php echo intval($p->ID); ?>)
-                </option>
+            <input type="text" id="fssc-posts-filter" class="chk-filter" placeholder="Filter posts/pages..." />
+            <div id="fssc-posts-box" class="chk-wrap">
+              <?php foreach ($posts as $p): $nm = get_the_title($p); ?>
+                <label data-text="<?php echo esc_attr('['.get_post_type($p).'] '.$nm); ?>">
+                  <input type="checkbox" value="<?php echo intval($p->ID); ?>" <?php checked(in_array($p->ID, $sel_ids, true)); ?> />
+                  [<?php echo esc_html(get_post_type($p)); ?>] <?php echo esc_html($nm); ?> (ID: <?php echo intval($p->ID); ?>)
+                </label>
               <?php endforeach; ?>
-            </select>
-            <input type="hidden" id="fssc_exclude_ids" name="fssc_exclude_ids" value="<?php echo esc_attr($ids_str); ?>" />
-            <div class="fssc-help">Use the list above to pick posts/pages to exclude. (Stored as IDs internally.)</div>
-            <script>
-              (function(){
-                const picker = document.getElementById('fssc_exclude_ids_picker');
-                const hidden = document.getElementById('fssc_exclude_ids');
-                function sync(){
-                  const vals = Array.from(picker.selectedOptions).map(o=>o.value);
-                  hidden.value = vals.join(',');
-                }
-                if(picker && hidden){
-                  picker.addEventListener('change', sync);
-                }
-              })();
-            </script>
+            </div>
+            <input type="hidden" id="fssc_exclude_ids" name="fssc_exclude_ids" value="<?php echo esc_attr($ids_s); ?>" />
+            <div class="fssc-help">Checked posts/pages will be excluded from the dataset.</div>
+          </div>
+
+          <!-- Disable widget on pages -->
+          <label for="fssc-pages-filter"><strong>Disable widget on pages</strong></label>
+          <div>
+            <input type="text" id="fssc-pages-filter" class="chk-filter" placeholder="Filter pages..." />
+            <div id="fssc-pages-box" class="chk-wrap">
+              <?php foreach ($pages as $pg): $nm = get_the_title($pg); ?>
+                <label data-text="<?php echo esc_attr($nm); ?>">
+                  <input type="checkbox" value="<?php echo intval($pg->ID); ?>" <?php checked(in_array($pg->ID, $sel_dis, true)); ?> />
+                  <?php echo esc_html($nm); ?> (ID: <?php echo intval($pg->ID); ?>)
+                </label>
+              <?php endforeach; ?>
+            </div>
+            <input type="hidden" id="fssc_disable_pages" name="fssc_disable_pages" value="<?php echo esc_attr($disable_s); ?>" />
+            <div class="fssc-help">Checked pages will not show the chat widget (e.g., checkout/landing).</div>
           </div>
         </div>
 
@@ -265,9 +350,21 @@ class FSSC_Plugin {
         <?php endif; ?>
       </div>
 
-      <p class="fssc-help">
-        Daily cron checks for content changes. If changed → rebuild + rotate filename. If unchanged → rotate filename only (no rebuild).
-      </p>
+      <hr>
+      <h2>Server rules (optional, extra hardening)</h2>
+      <p class="fssc-help">Access to the dataset is already nonce + origin protected. For additional blocking at the web server:</p>
+      <p><strong>Apache (.htaccess)</strong></p>
+      <div class="codebox"># already written by plugin, for reference
+Require all denied
+Deny from all</div>
+
+      <p><strong>Nginx / OpenLiteSpeed</strong></p>
+      <div class="codebox"># Block direct access to dataset JSON files
+location ~* /wp-content/uploads/fssc-dataset/.*\.json$ {
+  deny all;
+}</div>
+
+      <p class="fssc-help">Add the Nginx block inside your site/server config and reload the server.</p>
     </div>
     <?php
   }
@@ -279,7 +376,7 @@ class FSSC_Plugin {
       'fssc-chatbot',
       plugins_url('assets/chatbot.js', __FILE__),
       [],
-      '1.8.0',
+      '1.9.1',
       true
     );
   }
@@ -288,86 +385,83 @@ class FSSC_Plugin {
     if (is_admin()) return;
     $pos  = get_option('fssc_position', 'right');
     $left = ($pos === 'left');
+    $bg = get_option('fssc_color_bg', '#111827');
+    $fg = get_option('fssc_color_fg', '#ffffff');
     ?>
-  <style id="fssc-inline-css">
-    .fssc-root {
-      position: fixed; <?php echo $left ? 'left:22px;' : 'right:22px;'; ?> bottom:22px;
-      z-index: 99999;
-      font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
-    }
+<style id="fssc-inline-css">
+  .fssc-root {
+    position: fixed; <?php echo $left ? 'left:22px;' : 'right:22px;'; ?> bottom:22px;
+    z-index: 99999;
+    font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  }
+  .fssc-launcher {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: <?php echo esc_html($bg); ?>; color: <?php echo esc_html($fg); ?>;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 12px 30px rgba(0,0,0,.18);
+    cursor: pointer; border: 0; outline: none;
+    transition: transform .12s ease, filter .12s ease;
+  }
+  .fssc-launcher:hover { filter: brightness(1.05); }
+  .fssc-launcher:active { transform: scale(0.98); }
+  .fssc-launcher:focus-visible { box-shadow: 0 0 0 3px rgba(37,99,235,.45); }
+  .fssc-launcher.hidden { display: none; }
+  .fssc-icon { width: 22px; height: 22px; display: inline-block; }
 
-    /* Launcher button */
-    .fssc-launcher {
-      width: 56px; height: 56px; border-radius: 50%;
-      background: #111827; color: #fff;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 12px 30px rgba(0,0,0,.18);
-      cursor: pointer; border: 0; outline: none;
-      transition: transform .12s ease, filter .12s ease;
-    }
-    .fssc-launcher:hover { filter: brightness(1.05); }
-    .fssc-launcher:active { transform: scale(0.98); }
-    .fssc-launcher:focus-visible { box-shadow: 0 0 0 3px rgba(37,99,235,.45); }
-    .fssc-launcher.hidden { display: none; } /* hide when panel is open */
-    .fssc-icon { width: 22px; height: 22px; display: inline-block; }
+  .fssc-card {
+    width: 360px; max-width: 92vw;
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 16px;
+    box-shadow: 0 10px 25px rgba(0,0,0,.08);
+    overflow: hidden; display: none;
+  }
+  .fssc-card.open { display: block; }
 
-    /* Chat panel */
-    .fssc-card {
-      width: 360px; max-width: 92vw;
-      background: #fff; border: 1px solid #e5e7eb; border-radius: 16px;
-      box-shadow: 0 10px 25px rgba(0,0,0,.08);
-      overflow: hidden; display: none;
-    }
-    .fssc-card.open { display: block; }
+  .fssc-header {
+    padding: 12px 14px; font-weight: 600; border-bottom: 1px solid #f1f5f9;
+    display: flex; align-items: center; gap: 8px; justify-content: space-between;
+  }
+  .fssc-title { display: flex; align-items: center; gap: 8px; }
+  .fssc-close {
+    width: 40px; height: 40px; border-radius: 10px;
+    border: 1px solid #e5e7eb; background: #fff; color: #111827;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    font-size: 22px; line-height: 1;
+    transition: background-color .12s ease, transform .12s ease;
+  }
+  .fssc-close:hover { background: #f8fafc; }
+  .fssc-close:active { transform: scale(0.98); }
+  .fssc-close:focus-visible { box-shadow: 0 0 0 3px rgba(37,99,235,.35); outline: none; }
 
-    .fssc-header {
-      padding: 12px 14px; font-weight: 600; border-bottom: 1px solid #f1f5f9;
-      display: flex; align-items: center; gap: 8px; justify-content: space-between;
-    }
-    .fssc-title { display: flex; align-items: center; gap: 8px; }
+  .fssc-body { padding: 14px; max-height: 380px; overflow: auto; }
+  .fssc-msg { margin: 10px 0; }
+  .fssc-msg.user { text-align: right; }
+  .fssc-bubble { display: inline-block; padding: 10px 12px; border-radius: 16px; line-height: 1.35; }
+  .fssc-bubble.user { background: #eef2ff; }
+  .fssc-bubble.bot  { background: #f8fafc; }
 
-    /* Big emoji close button */
-    .fssc-close {
-      width: 40px; height: 40px; border-radius: 10px;
-      border: 1px solid #e5e7eb; background: #fff; color: #111827;
-      cursor: pointer; display: flex; align-items: center; justify-content: center;
-      font-size: 22px; line-height: 1;
-      transition: background-color .12s ease, transform .12s ease;
-    }
-    .fssc-close:hover { background: #f8fafc; }
-    .fssc-close:active { transform: scale(0.98); }
-    .fssc-close:focus-visible { box-shadow: 0 0 0 3px rgba(37,99,235,.35); outline: none; }
+  .fssc-input { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #f1f5f9; }
+  .fssc-input input { flex: 1; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 10px; }
+  .fssc-input input:focus { outline: none; box-shadow: 0 0 0 3px rgba(37,99,235,.25); }
+  .fssc-input button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827; color: #fff; cursor: pointer; }
+  .fssc-input button:hover { filter: brightness(1.05); }
+  .fssc-footer { font-size: 12px; color: #6b7280; padding: 0 14px 12px; }
 
-    .fssc-body { padding: 14px; max-height: 380px; overflow: auto; }
-    .fssc-msg { margin: 10px 0; }
-    .fssc-msg.user { text-align: right; }
-    .fssc-bubble { display: inline-block; padding: 10px 12px; border-radius: 16px; line-height: 1.35; }
-    .fssc-bubble.user { background: #eef2ff; }
-    .fssc-bubble.bot  { background: #f8fafc; }
+  .fssc-reslist { margin: 8px 0 0 18px; padding: 0; }
+  .fssc-reslist li { margin: 6px 0; }
+  .fssc-reslist a { color: #2563eb; text-decoration: none; }
+  .fssc-reslist a:hover { text-decoration: underline; }
 
-    .fssc-input { display: flex; gap: 8px; padding: 10px; border-top: 1px solid #f1f5f9; }
-    .fssc-input input { flex: 1; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 10px; }
-    .fssc-input input:focus { outline: none; box-shadow: 0 0 0 3px rgba(37,99,235,.25); }
-    .fssc-input button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827; color: #fff; cursor: pointer; }
-    .fssc-input button:hover { filter: brightness(1.05); }
-    .fssc-footer { font-size: 12px; color: #6b7280; padding: 0 14px 12px; }
-
-    .fssc-reslist { margin: 8px 0 0 18px; padding: 0; }
-    .fssc-reslist li { margin: 6px 0; }
-    .fssc-reslist a { color: #2563eb; text-decoration: none; }
-    .fssc-reslist a:hover { text-decoration: underline; }
-
-    @media (max-width: 480px) {
-      .fssc-card { width: 94vw; }
-    }
-  </style>
-
-
-    <?php
+  @media (max-width: 480px) { .fssc-card { width: 94vw; } }
+</style>
+<?php
   }
 
   public function render_widget_footer() {
     if (is_admin()) return;
+
+    // Disable on selected pages
+    $disable = $this->ids_from_csv(get_option('fssc_disable_pages',''));
+    if (!empty($disable) && is_page($disable)) return;
 
     $engine = $this->inline_minisearch_compat();
     wp_add_inline_script('fssc-chatbot', $engine, 'before');
@@ -380,7 +474,8 @@ class FSSC_Plugin {
       'datasetUrl' => esc_url_raw( rest_url('fssc/v1/dataset') ),
       'nonce'      => $nonce,
       'clientMaxPerMinute' => self::RL_PER_MIN,
-      'clientCooldownMs'   => 1200
+      'clientCooldownMs'   => 1200,
+      'topK'               => (int)get_option('fssc_topk',5)
     ]).';', 'before');
 
     echo '<div id="fssc-root" class="fssc-root" aria-live="polite"></div>';
