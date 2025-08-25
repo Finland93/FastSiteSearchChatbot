@@ -21,9 +21,7 @@
 
     <div class="fssc-card" id="fssc-card" role="dialog" aria-label="Site Assistant" aria-modal="false">
       <div class="fssc-header">
-        <div class="fssc-title">
-          <span>🤖 ${title}</span>
-        </div>
+        <div class="fssc-title"><span>🤖 ${title}</span></div>
         <button class="fssc-close" id="fssc-close" aria-label="Close assistant" title="Close">❌</button>
       </div>
       <div class="fssc-body" id="fssc-body">
@@ -49,23 +47,25 @@
 
   // State
   let mini = null;
+  let loaded = false;
   let lastQueryAt = 0;
   let open = false;
 
   // --- Open/Close helpers ---
-  function openPanel() {
+  async function openPanel() {
     if (open) return;
     open = true;
     cardEl.classList.add('open');
-    launcherEl.classList.add('hidden');         // HIDE launcher when open
+    launcherEl.classList.add('hidden');
     launcherEl.setAttribute('aria-expanded', 'true');
+    if (!loaded) { loaded = true; await loadDataset(); }
     setTimeout(() => inputEl && inputEl.focus(), 0);
   }
   function closePanel() {
     if (!open) return;
     open = false;
     cardEl.classList.remove('open');
-    launcherEl.classList.remove('hidden');      // SHOW launcher again
+    launcherEl.classList.remove('hidden');
     launcherEl.setAttribute('aria-expanded', 'false');
     launcherEl.focus();
   }
@@ -103,7 +103,7 @@
     return { ok:true };
   }
 
-  // --- Dataset load ---
+  // --- Dataset load (lazy) ---
   async function loadDataset(){
     try{
       const res = await fetch(datasetUrl,{credentials:'same-origin', headers:{'X-WP-Nonce':nonce}});
@@ -125,15 +125,18 @@
     }
   }
 
-  // --- Results (titles only) ---
+  // --- Results (titles only, same-tab links) ---
   function resultsList(results){
-    const items = results.map(r => `<li><a href="${sanitize(r.url)}" target="_blank" rel="noopener">${sanitize(r.title)}</a></li>`).join('');
+    const items = results.map(r => `<li><a href="${sanitize(r.url)}">${sanitize(r.title)}</a></li>`).join('');
     return `<ul class="fssc-reslist">${items}</ul>`;
   }
 
   async function handleQuery(raw){
     const q=(raw||'').trim();
-    if(!q||!mini) return;
+    if(!q) return;
+
+    // if user types before dataset loaded, load it now
+    if (!mini) { await loadDataset(); if (!mini) return; }
 
     const gate = canQueryNow();
     if (!gate.ok) { addMsg(gate.reason); return; }
@@ -155,6 +158,4 @@
 
   sendBtn.addEventListener('click', onSend);
   inputEl.addEventListener('keydown', e => { if(e.key==='Enter') onSend(); });
-
-  loadDataset();
 })();
