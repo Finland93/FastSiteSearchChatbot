@@ -33,7 +33,7 @@
         <input id="fssc-input" type="text" placeholder="Type your question and press Enter…" />
         <button id="fssc-send">Search</button>
       </div>
-      <div class="fssc-footer">Fast Site Search Chatbot</div>
+      <div class="fssc-footer"><a href="https://github.com/Finland93/FastSiteSearchChatbot" target="_blank" title="Get for your WordPress on Github">Fast Site Search Chatbot</a></div>
     </div>
   `;
 
@@ -159,3 +159,4 @@
   sendBtn.addEventListener('click', onSend);
   inputEl.addEventListener('keydown', e => { if(e.key==='Enter') onSend(); });
 })();
+
