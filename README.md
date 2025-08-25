@@ -3,8 +3,6 @@
 A lightweight, privacy-friendly **search chatbot** for WordPress.  
 Indexes your posts & pages into a **private JSON dataset** and lets visitors instantly search in a modern floating chat UI — **no external APIs, no AI costs**.
 
-![Demo Screenshot](screenshot.png) <!-- optional screenshot -->
-
 ## Features
 - **Zero AI/API costs** – runs entirely on your server + visitor’s browser.
 - **Modern floating chat widget** with open/close button.
