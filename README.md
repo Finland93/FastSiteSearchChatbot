@@ -1,7 +1,7 @@
 # Fast Site Search Chatbot – Chatbot Plugin for WordPress
 
 A lightweight, privacy-friendly **chatbot for WordPress** that lets visitors quickly find content on your site.  
-It scans your posts and pages into a private JSON index and provides an **instant floating chat widget** for user questions — no external APIs or AI required.
+It scans your posts and pages into a private JSON index and provides an **instant floating chat widget** for user questions — no external APIs or AI required. [Test it out here](https://money-protocol.com/course-navigation/).
 
 ---
 
