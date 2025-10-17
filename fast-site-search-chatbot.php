@@ -3,7 +3,7 @@
 Plugin Name: Fast Site Search Chatbot
 Plugin URI: https://github.com/Finland93/FastSiteSearchChatbot
 Description: No-AI chatbot that answers from your site content via a private JSON dataset and an inline MiniSearch-compatible engine. Auto widget, smart daily cron (rebuild only on change, rotate filename daily), exclude rules with UI pickers, hardened security, and server/client rate limiting.
-Version: 1.9.1
+Version: 1.9.2
 Author: Finland93
 Author URI: https://github.com/Finland93
 License: GPLv2 or later
@@ -376,7 +376,7 @@ location ~* /wp-content/uploads/fssc-dataset/.*\.json$ {
       'fssc-chatbot',
       plugins_url('assets/chatbot.js', __FILE__),
       [],
-      '1.9.1',
+      '1.9.2',
       true
     );
   }
@@ -467,7 +467,7 @@ location ~* /wp-content/uploads/fssc-dataset/.*\.json$ {
     wp_add_inline_script('fssc-chatbot', $engine, 'before');
 
     wp_enqueue_script('fssc-chatbot');
-    $nonce = wp_create_nonce('wp_rest');
+    $nonce = is_user_logged_in() ? wp_create_nonce('wp_rest') : wp_create_nonce('wp_rest_public');
     $title = get_bloginfo('name') . ' – Assistant';
     wp_add_inline_script('fssc-chatbot', 'window.FSSC='.wp_json_encode([
       'title'      => $title,
@@ -776,7 +776,8 @@ JS;
 
   public function rest_dataset(\WP_REST_Request $req) {
     $nonce = $req->get_header('x-wp-nonce');
-    if (!wp_verify_nonce($nonce, 'wp_rest')) {
+    $action = is_user_logged_in() ? 'wp_rest' : 'wp_rest_public';
+    if (!wp_verify_nonce($nonce, $action)) {
       return new WP_Error('forbidden','Invalid nonce', ['status'=>403]);
     }
 
