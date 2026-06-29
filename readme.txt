@@ -4,7 +4,7 @@ Donate link: https://github.com/Finland93
 Tags: search, chatbot, site-search, faq, no-ai, privacy
 Requires at least: 5.0
 Tested up to: 6.5
-Stable tag: 1.8.0
+Stable tag: 1.9.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -26,6 +26,16 @@ Fast Site Search Chatbot adds a floating chat-style search box for your WordPres
 2. Admin settings panel with exclusions.
 
 == Changelog ==
+= 1.9.4 =
+* Fixed: the chatbot now works for logged-out visitors. Guests previously sent a custom 'wp_rest_public' nonce in X-WP-Nonce, which WordPress core always validates against 'wp_rest' and rejected with 403 before the plugin ran. Guests now send no nonce and the public dataset is served under the existing same-origin + rate-limit protection (which also fixes caching).
+
+= 1.9.3 =
+* Hardening: unslash + sanitize all superglobal input (nonce, REST header, IP, origin/referer).
+* Fix: anonymous REST reads no longer write a filename option to the database before the first build.
+
+= 1.9.2 =
+* Auto widget, exclude-rules UI pickers, colour options, smart cron rebuild + daily filename rotation.
+
 = 1.8.0 =
 * Added floating launcher & close button.
 * Results show as list of links (titles only).

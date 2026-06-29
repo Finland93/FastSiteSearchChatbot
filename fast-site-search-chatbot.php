@@ -3,7 +3,7 @@
 Plugin Name: Fast Site Search Chatbot
 Plugin URI: https://github.com/Finland93/FastSiteSearchChatbot
 Description: No-AI chatbot that answers from your site content via a private JSON dataset and an inline MiniSearch-compatible engine. Auto widget, smart daily cron (rebuild only on change, rotate filename daily), exclude rules with UI pickers, hardened security, and server/client rate limiting.
-Version: 1.9.2
+Version: 1.9.4
 Author: Finland93
 Author URI: https://github.com/Finland93
 License: GPLv2 or later
@@ -376,7 +376,7 @@ location ~* /wp-content/uploads/fssc-dataset/.*\.json$ {
       'fssc-chatbot',
       plugins_url('assets/chatbot.js', __FILE__),
       [],
-      '1.9.2',
+      '1.9.4',
       true
     );
   }
@@ -467,7 +467,13 @@ location ~* /wp-content/uploads/fssc-dataset/.*\.json$ {
     wp_add_inline_script('fssc-chatbot', $engine, 'before');
 
     wp_enqueue_script('fssc-chatbot');
-    $nonce = is_user_logged_in() ? wp_create_nonce('wp_rest') : wp_create_nonce('wp_rest_public');
+    // Logged-in visitors send a standard wp_rest nonce. Guests send NO nonce:
+    // WordPress core validates any X-WP-Nonce header against the 'wp_rest'
+    // action, so a custom public nonce is always rejected for guests (this is
+    // why the widget previously did nothing when logged out). The dataset is
+    // read-only published content, guarded by the same-origin + rate-limit
+    // checks in the REST handler.
+    $nonce = is_user_logged_in() ? wp_create_nonce('wp_rest') : '';
     $title = get_bloginfo('name') . ' – Assistant';
     wp_add_inline_script('fssc-chatbot', 'window.FSSC='.wp_json_encode([
       'title'      => $title,
@@ -613,7 +619,8 @@ JS;
 
   public function ajax_build_dataset() {
     if (!current_user_can('manage_options')) wp_send_json_error(['message'=>'Forbidden']);
-    if (empty($_POST['_fssc_nonce']) || !wp_verify_nonce($_POST['_fssc_nonce'], 'fssc_build')) {
+    $nonce = isset($_POST['_fssc_nonce']) ? sanitize_text_field(wp_unslash($_POST['_fssc_nonce'])) : '';
+    if (empty($nonce) || !wp_verify_nonce($nonce, 'fssc_build')) {
       wp_send_json_error(['message'=>'Invalid nonce']);
     }
     $result = $this->build_dataset(false);
@@ -734,7 +741,9 @@ JS;
   }
 
   private function dataset_info() {
-    $path = $this->dataset_path_current();
+    $file = get_option(self::OPT_FILE, '');
+    if (!$file) return null;
+    $path = trailingslashit($this->uploads_dir_secure()) . $file;
     if (!file_exists($path)) return null;
     $raw = @file_get_contents($path);
     if (!$raw) return null;
@@ -759,7 +768,7 @@ JS;
   }
 
   private function check_rate_limit() {
-    $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '0.0.0.0';
     $keyMin  = 'fssc_rl_min_'  . md5($ip);
     $keyHour = 'fssc_rl_hour_' . md5($ip);
 
@@ -775,16 +784,21 @@ JS;
   }
 
   public function rest_dataset(\WP_REST_Request $req) {
-    $nonce = $req->get_header('x-wp-nonce');
-    $action = is_user_logged_in() ? 'wp_rest' : 'wp_rest_public';
-    if (!wp_verify_nonce($nonce, $action)) {
-      return new WP_Error('forbidden','Invalid nonce', ['status'=>403]);
+    // Enforce a nonce only for logged-in requests. For guests the dataset is
+    // public read-only content protected by the same-origin + rate-limit
+    // checks below; requiring a nonce there breaks page caching and is
+    // rejected by WordPress core regardless (it checks X-WP-Nonce vs 'wp_rest').
+    if (is_user_logged_in()) {
+      $nonce = sanitize_text_field((string) $req->get_header('x-wp-nonce'));
+      if (!wp_verify_nonce($nonce, 'wp_rest')) {
+        return new WP_Error('forbidden','Invalid nonce', ['status'=>403]);
+      }
     }
 
     $homeHost = wp_parse_url(home_url(), PHP_URL_HOST);
     $okOrigin = true;
-    $origin  = $_SERVER['HTTP_ORIGIN']  ?? '';
-    $referer = $_SERVER['HTTP_REFERER'] ?? '';
+    $origin  = isset($_SERVER['HTTP_ORIGIN'])  ? esc_url_raw(wp_unslash($_SERVER['HTTP_ORIGIN']))  : '';
+    $referer = isset($_SERVER['HTTP_REFERER']) ? esc_url_raw(wp_unslash($_SERVER['HTTP_REFERER'])) : '';
     foreach ([$origin, $referer] as $h) {
       if ($h) {
         $host = wp_parse_url($h, PHP_URL_HOST);
@@ -797,7 +811,9 @@ JS;
       return new WP_Error('too_many','Rate limit exceeded', ['status'=>429]);
     }
 
-    $path = $this->dataset_path_current();
+    $file = get_option(self::OPT_FILE, '');
+    if (!$file) return new WP_Error('not_found','Dataset not built', ['status'=>404]);
+    $path = trailingslashit($this->uploads_dir_secure()) . $file;
     if (!file_exists($path)) return new WP_Error('not_found','Dataset not built', ['status'=>404]);
     $raw = @file_get_contents($path);
     if (!$raw) return new WP_Error('server_error','Unable to read dataset', ['status'=>500]);
