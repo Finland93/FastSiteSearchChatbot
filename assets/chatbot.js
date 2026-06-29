@@ -106,7 +106,9 @@
   // --- Dataset load (lazy) ---
   async function loadDataset(){
     try{
-      const res = await fetch(datasetUrl,{credentials:'same-origin', headers:{'X-WP-Nonce':nonce}});
+      const headers = {};
+      if (nonce) headers['X-WP-Nonce'] = nonce; // guests send no nonce (see PHP note)
+      const res = await fetch(datasetUrl, { credentials: 'same-origin', headers });
       if(!res.ok) throw new Error('Dataset fetch failed');
       const data = await res.json();
       const docs = data.docs || [];
